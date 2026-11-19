@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"name": "PhysXCodeSpace",
+			"path": "."
+		},
+		{
+			"name": "PhysX",
+			"path": "../PhysX"
+		}
+	],
+	"settings": {}
+}
