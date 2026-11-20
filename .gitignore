@@ -25,6 +25,10 @@ glad-cmake/
 .DS_Store
 Thumbs.db
 
+# Dear ImGui saves panel layouts in the application's working directory
+imgui.ini
+imgui-*.ini
+
 # Python cache created by the GLAD generator
 __pycache__/
 *.py[cod]
