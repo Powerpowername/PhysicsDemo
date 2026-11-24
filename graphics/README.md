@@ -15,7 +15,7 @@ app.run();
 
 | 成员 | 用途 |
 | --- | --- |
-| `camera`、`drawScene` | 设置相机、提交本项目的场景物体，例如调用 `renderer.drawBox(...)`。工作台负责开始和结束绘制。 |
+| `camera`、`drawScene` | 设置相机、提交本项目的场景物体，例如调用 `renderer.drawMesh(...)`。工作台负责开始和结束绘制。 |
 | `controls` | 在左侧播放按钮下面添加项目自己的控件或说明。 |
 | `inspector` | 在右侧显示物理状态；未设置时，中央视口使用这部分空间。 |
 
@@ -45,26 +45,31 @@ app.run();
 
 ## Graphics::SceneRenderer
 
-`Graphics::SceneRenderer` 只依赖当前 OpenGL 上下文，不依赖 PhysX。它拥有自己的着色器和内置立方体网格，适合把物理对象的姿态转换后交给它绘制：
+`Graphics::SceneRenderer` 只依赖当前 OpenGL 上下文，不依赖 PhysX。它只负责把网格提交到当前场景，不知道网格是方块、球体还是项目自定义形状：
 
 先创建 `Graphics::Window`，再创建 `SceneRenderer`，并在同一个主线程中使用它们；这样构造和析构时 OpenGL 上下文始终有效。
 
 ```cpp
+#include <graphics/Primitives.hpp>
+
 graphics::SceneRenderer renderer;
 renderer.beginScene(camera, window.framebufferSize());
-renderer.drawBox({position, rotation, scale}, halfExtents, {color});
+const auto box = renderer.createMesh(graphics::primitives::box());
+renderer.drawMesh(box, {position, rotation, scale}, {color});
 renderer.endScene();
 ```
 
-`Transform`、`Camera` 和 `Material` 是渲染层的数据类型；PhysX 的 `PxTransform` 应在应用层转换成 `Transform`。`drawBox()` 是当前的便捷绘制接口，后续可以在不改变窗口和现有方块调用的情况下增加网格、纹理和灯光接口。
+`MeshData` 只包含 CPU 侧顶点和索引，`createMesh()` 在当前 OpenGL 上下文中上传一次并返回 `MeshHandle`。后续每帧只传句柄、变换和材质。`Material::referenceLines` 可以给需要观察旋转的物体开启局部坐标参考线；球体使用它绘制随姿态旋转的纬线和经线。`Transform`、`Camera` 和 `Material` 是渲染层的数据类型；PhysX 的 `PxTransform` 应在应用层转换成 `Transform`。
 
 如果只绘制窗口的一部分，用 `beginScene(camera, viewportSize, viewportOrigin)`。尺寸和左下角坐标均为帧缓冲像素；场景只清除和绘制这个矩形，`endScene()` 恢复之前的视口和裁剪区域。
+
+常用的方块和球体数据集中在 `graphics::primitives` 中。项目在第一次绘制时创建句柄，之后使用同一个句柄绘制任意数量的实例。新增形状只需提供 `MeshData`；不需要修改 `SceneRenderer`，也不需要为每种形状增加 Renderer 类或 CMake 目标。
 
 ## 着色器归档
 
 GLSL 源文件统一放在 `graphics/shaders/`，按所有者分目录、按用途命名。同一程序的两个阶段使用相同文件名，仅后缀不同：
 
-- `scene/box.vert.glsl`、`scene/box.frag.glsl`：共享方块渲染器的顶点与片元着色器。
+- `scene/mesh.vert.glsl`、`scene/mesh.frag.glsl`：所有基础三角网格共用的顶点与片元着色器。
 - 项目专用的着色器放在以项目命名的子目录，例如 `RigidBody/`；复用共享程序的项目不必另存一份。
 
 CMake 构建时按原目录结构同步 `*.glsl` 到构建目录的 `graphics/shaders/`。链接 `Graphics::SceneRenderer` 后，可包含 `<graphics/Shader.hpp>`，并在窗口创建后用归档内的两个相对路径构造 `graphics::Shader`。路径不依赖启动程序的工作目录。调用 `use()` 绑定程序；`uniformLocation("model")` 查询一个已启用的 uniform，位置可以在初始化时保存。对象析构时释放 OpenGL 程序，因此应在销毁窗口前释放。

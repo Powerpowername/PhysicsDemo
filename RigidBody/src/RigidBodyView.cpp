@@ -1,6 +1,7 @@
 #include "RigidBodyView.hpp"
 #include "PhysicsWorld.hpp"
 
+#include <graphics/Primitives.hpp>
 #include <graphics/Workbench.hpp>
 #include <imgui.h>
 
@@ -43,11 +44,16 @@ void configureRigidBodyView(graphics::Workbench& app, const PhysicsWorld& world)
             ImGui::TextDisabled("Waiting for impact");
         }
     };
-    app.drawScene = [&world](graphics::SceneRenderer& renderer)
+    app.drawScene = [&world, boxMesh = graphics::MeshHandle{}](graphics::SceneRenderer& renderer) mutable
     {
+        if (!boxMesh) boxMesh = renderer.createMesh(graphics::primitives::box());
         const auto pose = world.box->getGlobalPose();
-        renderer.drawBox({{0, -0.05f, 0}}, {5, 0.05f, 5}, {{0.31f, 0.36f, 0.40f, 1}});
-        renderer.drawBox({{pose.p.x, pose.p.y, pose.p.z}, {pose.q.w, pose.q.x, pose.q.y, pose.q.z}},
-                         {0.5f, 0.5f, 0.5f}, {{1.0f, 0.54f, 0.23f, 1}});
+        renderer.drawMesh(boxMesh, {{0, -0.05f, 0}, {}, {5, 0.05f, 5}},
+                          {{0.31f, 0.36f, 0.40f, 1}});
+        renderer.drawMesh(boxMesh,
+                          {{pose.p.x, pose.p.y, pose.p.z},
+                           {pose.q.w, pose.q.x, pose.q.y, pose.q.z},
+                           {0.5f, 0.5f, 0.5f}},
+                          {{1.0f, 0.54f, 0.23f, 1}});
     };
 }

@@ -4,7 +4,7 @@ target_compile_features(graphics_window PUBLIC cxx_std_17)
 target_include_directories(graphics_window PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(graphics_window PUBLIC glad imgui glm::glm PRIVATE glfw OpenGL::GL)
 
-add_library(graphics_scene_renderer STATIC src/SceneRenderer.cpp src/Shader.cpp)
+add_library(graphics_scene_renderer STATIC src/SceneRenderer.cpp src/Shader.cpp src/Primitives.cpp)
 add_library(Graphics::SceneRenderer ALIAS graphics_scene_renderer)
 target_compile_features(graphics_scene_renderer PUBLIC cxx_std_17)
 target_include_directories(graphics_scene_renderer PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

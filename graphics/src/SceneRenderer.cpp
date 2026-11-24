@@ -5,54 +5,80 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
-#include <iterator>
+#include <cstddef>
 #include <stdexcept>
+#include <cstdint>
+#include <unordered_map>
 
 namespace graphics
 {
 namespace
 {
-// The cube spans [-1, 1] on each axis, so its model scale is its half extents.
-constexpr GLfloat boxVertices[][3] = {
-    {-1,-1, 1}, { 1,-1, 1}, { 1, 1, 1},  { 1, 1, 1}, {-1, 1, 1}, {-1,-1, 1}, // +Z
-    {-1,-1,-1}, {-1, 1,-1}, { 1, 1,-1},  { 1, 1,-1}, { 1,-1,-1}, {-1,-1,-1}, // -Z
-    {-1,-1,-1}, {-1,-1, 1}, {-1, 1, 1},  {-1, 1, 1}, {-1, 1,-1}, {-1,-1,-1}, // -X
-    { 1,-1,-1}, { 1, 1,-1}, { 1, 1, 1},  { 1, 1, 1}, { 1,-1, 1}, { 1,-1,-1}, // +X
-    {-1, 1, 1}, { 1, 1, 1}, { 1, 1,-1},  { 1, 1,-1}, {-1, 1,-1}, {-1, 1, 1}, // +Y
-    {-1,-1,-1}, { 1,-1,-1}, { 1,-1, 1},  { 1,-1, 1}, {-1,-1, 1}, {-1,-1,-1}, // -Y
+struct MeshResources
+{
+    GLuint vertexArray = 0;
+    GLuint vertexBuffer = 0;
+    GLuint indexBuffer = 0;
+    GLsizei indexCount = 0;
+
+    explicit MeshResources(const MeshData& mesh)
+    {
+        if (mesh.vertices.empty() || mesh.indices.empty() || mesh.indices.size() % 3 != 0)
+            throw std::invalid_argument("SceneRenderer mesh must contain indexed triangles");
+        for (const auto index : mesh.indices)
+        {
+            if (index >= mesh.vertices.size())
+                throw std::invalid_argument("SceneRenderer mesh index is out of range");
+        }
+        indexCount = static_cast<GLsizei>(mesh.indices.size());
+        glGenVertexArrays(1, &vertexArray);
+        glGenBuffers(1, &vertexBuffer);
+        glGenBuffers(1, &indexBuffer);
+        glBindVertexArray(vertexArray);
+        glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
+        glBufferData(GL_ARRAY_BUFFER, mesh.vertices.size() * sizeof(MeshVertex),
+                     mesh.vertices.data(), GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(MeshVertex), nullptr);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(MeshVertex),
+                              reinterpret_cast<const void*>(offsetof(MeshVertex, normal)));
+        glEnableVertexAttribArray(1);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffer);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh.indices.size() * sizeof(std::uint32_t),
+                     mesh.indices.data(), GL_STATIC_DRAW);
+        glBindVertexArray(0);
+    }
+
+    MeshResources(const MeshResources&) = delete;
+    MeshResources& operator=(const MeshResources&) = delete;
+
+    ~MeshResources()
+    {
+        if (indexBuffer) glDeleteBuffers(1, &indexBuffer);
+        if (vertexBuffer) glDeleteBuffers(1, &vertexBuffer);
+        if (vertexArray) glDeleteVertexArrays(1, &vertexArray);
+    }
 };
 }
 
 struct SceneRenderer::Impl
 {
-    Shader shader{"scene/box.vert.glsl", "scene/box.frag.glsl"};
+    Shader shader{"scene/mesh.vert.glsl", "scene/mesh.frag.glsl"};
     GLint viewProjectionLocation = shader.uniformLocation("viewProjection");
     GLint modelLocation = shader.uniformLocation("model");
     GLint colorLocation = shader.uniformLocation("color");
-    GLuint vertexArray = 0;
-    GLuint vertexBuffer = 0;
+    GLint referenceLinesLocation = shader.uniformLocation("referenceLines");
+    std::unordered_map<std::uint32_t, MeshResources> meshes;
+    std::uint32_t nextMesh = 1;
+    glm::mat4 viewProjection{1.0f};
     GLint previousViewport[4]{};
     GLint previousScissor[4]{};
     GLboolean scissorWasEnabled = GL_FALSE;
     bool sceneOpen = false;
-
-    ~Impl()
-    {
-        if (vertexBuffer) glDeleteBuffers(1, &vertexBuffer);
-        if (vertexArray) glDeleteVertexArrays(1, &vertexArray);
-    }
 };
 
 SceneRenderer::SceneRenderer() : impl_(std::make_unique<Impl>())
 {
-    glGenVertexArrays(1, &impl_->vertexArray);
-    glGenBuffers(1, &impl_->vertexBuffer);
-    glBindVertexArray(impl_->vertexArray);
-    glBindBuffer(GL_ARRAY_BUFFER, impl_->vertexBuffer);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(boxVertices), boxVertices, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(boxVertices[0]), nullptr);
-    glEnableVertexAttribArray(0);
-    glBindVertexArray(0);
 }
 
 SceneRenderer::~SceneRenderer() = default;
@@ -72,7 +98,6 @@ void SceneRenderer::beginScene(const Camera& camera, glm::ivec2 viewportSize, gl
                                                    camera.nearPlane, camera.farPlane);
     const glm::mat4 view = glm::lookAt(camera.position, camera.target, camera.up);
     glEnable(GL_DEPTH_TEST);
-    impl_->shader.use();
     glGetIntegerv(GL_VIEWPORT, impl_->previousViewport);
     glGetIntegerv(GL_SCISSOR_BOX, impl_->previousScissor);
     impl_->scissorWasEnabled = glIsEnabled(GL_SCISSOR_TEST);
@@ -83,24 +108,37 @@ void SceneRenderer::beginScene(const Camera& camera, glm::ivec2 viewportSize, gl
     constexpr GLfloat background[] = {0.08f, 0.10f, 0.14f, 1.0f};
     glClearBufferfv(GL_COLOR, 0, background);
     glClear(GL_DEPTH_BUFFER_BIT);
-    glUniformMatrix4fv(impl_->viewProjectionLocation, 1, GL_FALSE,
-                       glm::value_ptr(projection * view));
-    glBindVertexArray(impl_->vertexArray);
+    impl_->viewProjection = projection * view;
     impl_->sceneOpen = true;
 }
 
-void SceneRenderer::drawBox(const Transform& transform, const glm::vec3& halfExtents,
-                            const Material& material)
+MeshHandle SceneRenderer::createMesh(const MeshData& mesh)
+{
+    if (impl_->nextMesh == 0)
+        throw std::overflow_error("SceneRenderer mesh handle space is exhausted");
+    const auto id = impl_->nextMesh++;
+    impl_->meshes.try_emplace(id, mesh);
+    return {id};
+}
+
+void SceneRenderer::drawMesh(MeshHandle mesh, const Transform& transform,
+                             const Material& material)
 {
     if (!impl_->sceneOpen) throw std::logic_error("SceneRenderer scene is not open");
-    if (halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f)
-        throw std::invalid_argument("SceneRenderer box extents must be positive");
+    const auto resource = impl_->meshes.find(mesh.value);
+    if (resource == impl_->meshes.end())
+        throw std::invalid_argument("SceneRenderer received an invalid mesh handle");
     const glm::mat4 model = glm::translate(glm::mat4(1.0f), transform.position)
         * glm::mat4_cast(transform.rotation)
-        * glm::scale(glm::mat4(1.0f), halfExtents * transform.scale);
+        * glm::scale(glm::mat4(1.0f), transform.scale);
+    impl_->shader.use();
+    glUniformMatrix4fv(impl_->viewProjectionLocation, 1, GL_FALSE,
+                       glm::value_ptr(impl_->viewProjection));
     glUniformMatrix4fv(impl_->modelLocation, 1, GL_FALSE, glm::value_ptr(model));
     glUniform4fv(impl_->colorLocation, 1, glm::value_ptr(material.color));
-    glDrawArrays(GL_TRIANGLES, 0, std::size(boxVertices));
+    glUniform1i(impl_->referenceLinesLocation, material.referenceLines ? GL_TRUE : GL_FALSE);
+    glBindVertexArray(resource->second.vertexArray);
+    glDrawElements(GL_TRIANGLES, resource->second.indexCount, GL_UNSIGNED_INT, nullptr);
 }
 
 void SceneRenderer::endScene()

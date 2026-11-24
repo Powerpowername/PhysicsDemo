@@ -1,12 +1,11 @@
 #include "BoxStackView.hpp"
-#include "BallRenderer.hpp"
 #include "StackWorld.hpp"
 
+#include <graphics/Primitives.hpp>
 #include <graphics/Workbench.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <imgui_internal.h>
 
-#include <optional>
 
 namespace
 {
@@ -14,21 +13,6 @@ graphics::Transform transformOf(const physx::PxRigidDynamic& body)
 {
     const auto pose = body.getGlobalPose();
     return {{pose.p.x, pose.p.y, pose.p.z}, {pose.q.w, pose.q.x, pose.q.y, pose.q.z}};
-}
-
-// The workbench owns the only window. Destroy its sphere mesh before the GL context closes.
-BallRenderer& ballRenderer()
-{
-    static std::optional<BallRenderer> mesh;
-    if (!mesh)
-    {
-        mesh.emplace();
-        ImGuiContextHook hook;
-        hook.Type = ImGuiContextHookType_Shutdown;
-        hook.Callback = [](ImGuiContext*, ImGuiContextHook*) { mesh.reset(); };
-        ImGui::AddContextHook(ImGui::GetCurrentContext(), &hook);
-    }
-    return *mesh;
 }
 
 void launchOnClick(StackWorld& world, const graphics::Camera& camera,
@@ -73,8 +57,11 @@ void configureBoxStackView(graphics::Workbench& app, StackWorld& world)
         ImGui::Text("Balls  %zu", world.balls.size());
     };
 
-    app.drawScene = [&app, &world](graphics::SceneRenderer& renderer)
+    app.drawScene = [&app, &world, boxMesh = graphics::MeshHandle{}, sphereMesh = graphics::MeshHandle{}]
+                    (graphics::SceneRenderer& renderer) mutable
     {
+        if (!boxMesh) boxMesh = renderer.createMesh(graphics::primitives::box());
+        if (!sphereMesh) sphereMesh = renderer.createMesh(graphics::primitives::sphere());
         glm::ivec4 viewport;
         glGetIntegerv(GL_VIEWPORT, &viewport.x);
         const auto& camera = app.camera;
@@ -84,17 +71,23 @@ void configureBoxStackView(graphics::Workbench& app, StackWorld& world)
                                   * glm::lookAt(camera.position, camera.target, camera.up);
         launchOnClick(world, camera, viewProjection, viewport);
 
-        renderer.drawBox({{0, -0.05f, 0}}, {20, 0.05f, 20}, {{0.32f, 0.37f, 0.42f, 1}});
+        renderer.drawMesh(boxMesh, {{0, -0.05f, 0}, {}, {20, 0.05f, 20}},
+                          {{0.32f, 0.37f, 0.42f, 1}});
         const graphics::Material colors[] = {{{0.22f, 0.68f, 0.73f, 1}}, {{0.35f, 0.82f, 0.79f, 1}}};
         for (std::size_t i = 0; i < world.boxes.size(); ++i)
-            renderer.drawBox(transformOf(*world.boxes[i]), glm::vec3{StackWorld::halfExtent}, colors[i % 2]);
+        {
+            auto transform = transformOf(*world.boxes[i]);
+            transform.scale = glm::vec3{StackWorld::halfExtent};
+            renderer.drawMesh(boxMesh, transform, colors[i % 2]);
+        }
 
         if (world.balls.empty()) return;
-        auto& balls = ballRenderer();
+        const graphics::Material ballColor{{1.0f, 0.42f, 0.08f, 1.0f}, true};
         for (const auto* body : world.balls)
         {
-            const auto pose = transformOf(*body);
-            balls.draw(viewProjection, pose.position, pose.rotation, StackWorld::ballRadius);
+            auto pose = transformOf(*body);
+            pose.scale = glm::vec3{StackWorld::ballRadius};
+            renderer.drawMesh(sphereMesh, pose, ballColor);
         }
     };
 }

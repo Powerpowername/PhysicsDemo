@@ -1,5 +1,7 @@
 #pragma once
 
+#include <graphics/Mesh.hpp>
+
 #include <glad/gl.h>
 #include <glm/glm.hpp>
 #include <glm/mat4x4.hpp>
@@ -21,6 +23,7 @@ struct Transform
 struct Material
 {
     glm::vec4 color{1.0f};
+    bool referenceLines = false;
 };
 
 struct Camera
@@ -44,9 +47,9 @@ public:
 
     void beginScene(const Camera& camera, glm::ivec2 framebufferSize);
     void beginScene(const Camera& camera, glm::ivec2 viewportSize, glm::ivec2 viewportOrigin);
-    void drawBox(const Transform& transform,
-                 const glm::vec3& halfExtents,
-                 const Material& material = {});
+    MeshHandle createMesh(const MeshData& mesh);
+    void drawMesh(MeshHandle mesh, const Transform& transform,
+                  const Material& material = {});
     void endScene();
 
 private:
