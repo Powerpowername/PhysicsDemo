@@ -3,6 +3,7 @@
 
 #include <graphics/Primitives.hpp>
 #include <graphics/Workbench.hpp>
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/quaternion.hpp>
 #include <imgui_internal.h>
@@ -12,51 +13,89 @@
 
 namespace
 {
-graphics::Transform transformOf(const physx::PxRigidDynamic& body)
+using Kind = JointWorld::Kind;
+
+glm::vec3 vectorOf(const physx::PxVec3& v) { return {v.x, v.y, v.z}; }
+
+graphics::Transform transformOf(const physx::PxRigidDynamic& actor, glm::vec3 halfExtents)
 {
-    const auto pose = body.getGlobalPose();
-    return {{pose.p.x, pose.p.y, pose.p.z}, {pose.q.w, pose.q.x, pose.q.y, pose.q.z}};
+    const auto pose = actor.getGlobalPose();
+    return {vectorOf(pose.p), {pose.q.w, pose.q.x, pose.q.y, pose.q.z}, halfExtents};
 }
 
-struct Ray { glm::vec3 origin; glm::vec3 direction; };
-
-bool makeRay(const ImVec2& mouse, const graphics::Camera& camera,
-             const glm::ivec4& viewport, Ray& ray)
+// Both pins use the same capsule, scaled by their PhysX radius along all three axes.
+graphics::MeshData axleMesh()
 {
-    if (viewport.z <= 0 || viewport.w <= 0) return false;
+    graphics::MeshData mesh;
+    constexpr int slices = 24;
+    constexpr int capRings = 6;
+    for (int side : {-1, 1})
+    {
+        for (int ring = 0; ring <= capRings; ++ring)
+        {
+            const float latitude = glm::half_pi<float>() * (static_cast<float>(ring) / capRings - (side < 0 ? 1 : 0));
+            for (int i = 0; i < slices; ++i)
+            {
+                const float angle = glm::two_pi<float>() * i / slices;
+                const glm::vec3 normal{std::sin(latitude), std::cos(latitude) * std::cos(angle),
+                                       std::cos(latitude) * std::sin(angle)};
+                mesh.vertices.push_back({normal + glm::vec3{side * JointWorld::shaftHalfLengthInRadii, 0, 0}, normal});
+            }
+        }
+    }
+    const auto ringCount = 2 * (capRings + 1);
+    for (int r = 0; r < ringCount - 1; ++r)
+        for (int i = 0; i < slices; ++i)
+        {
+            const auto a = static_cast<std::uint32_t>(r * slices + i);
+            const auto b = static_cast<std::uint32_t>(r * slices + (i + 1) % slices);
+            if (r > 0) mesh.indices.insert(mesh.indices.end(), {a, b, a + slices});
+            if (r < ringCount - 2) mesh.indices.insert(mesh.indices.end(), {b, b + slices, a + slices});
+        }
+    return mesh;
+}
+
+// The scene occupies the center dock only. Labels and picking must use that same rectangle.
+struct SceneProjection
+{
+    ImRect rect;
+    glm::mat4 viewProjection;
+
+    glm::vec3 rayDirection(ImVec2 mouse, glm::vec3 cameraPosition) const
+    {
+        const float x = 2 * (mouse.x - rect.Min.x) / rect.GetWidth() - 1;
+        const float y = 1 - 2 * (mouse.y - rect.Min.y) / rect.GetHeight();
+        const auto near = glm::inverse(viewProjection) * glm::vec4{x, y, -1, 1};
+        return glm::normalize(glm::vec3{near} / near.w - cameraPosition);
+    }
+
+    void label(glm::vec3 position, const char* name) const
+    {
+        const auto clip = viewProjection * glm::vec4{position, 1};
+        if (clip.w <= 0 || std::abs(clip.z) > clip.w) return;
+        const glm::vec2 ndc = glm::vec2{clip} / clip.w;
+        ImVec2 text{rect.Min.x + (ndc.x + 1) * rect.GetWidth() * 0.5f,
+                    rect.Min.y + (1 - ndc.y) * rect.GetHeight() * 0.5f};
+        text.x -= ImGui::CalcTextSize(name).x * 0.5f;
+        ImGui::GetBackgroundDrawList()->AddText(text, IM_COL32(230, 237, 242, 255), name);
+    }
+};
+
+SceneProjection sceneProjection(const graphics::Camera& camera)
+{
+    glm::ivec4 viewport;
+    glGetIntegerv(GL_VIEWPORT, &viewport.x);
     const auto* main = ImGui::GetMainViewport();
-    const auto& io = ImGui::GetIO();
-    const float x = (mouse.x - main->Pos.x) * io.DisplayFramebufferScale.x;
-    const float y = (io.DisplaySize.y - mouse.y + main->Pos.y) * io.DisplayFramebufferScale.y;
-    if (x < viewport.x || x >= viewport.x + viewport.z || y < viewport.y || y >= viewport.y + viewport.w)
-        return false;
-    const glm::vec2 ndc = 2.0f * (glm::vec2{x, y} - glm::vec2{viewport}) /
-                          glm::vec2{viewport.z, viewport.w} - 1.0f;
+    const auto scale = ImGui::GetIO().DisplayFramebufferScale;
+    const ImVec2 min{main->Pos.x + viewport.x / scale.x,
+                     main->Pos.y + main->Size.y - (viewport.y + viewport.w) / scale.y};
+    const ImVec2 max{min.x + viewport.z / scale.x, min.y + viewport.w / scale.y};
     const auto projection = glm::perspective(glm::radians(camera.fieldOfView),
-                                             static_cast<float>(viewport.z) / viewport.w,
-                                             camera.nearPlane, camera.farPlane);
-    const auto inverse = glm::inverse(projection * glm::lookAt(camera.position, camera.target, camera.up));
-    const auto nearPoint = inverse * glm::vec4{ndc, -1.0f, 1.0f};
-    const glm::vec3 nearPosition = glm::vec3{nearPoint} / nearPoint.w;
-    const glm::vec3 direction = nearPosition - camera.position;
-    const float length = glm::length(direction);
-    if (!std::isfinite(length) || length <= 0.0f) return false;
-    ray = {camera.position, direction / length};
-    return true;
+        static_cast<float>(viewport.z) / viewport.w, camera.nearPlane, camera.farPlane);
+    return {{min, max}, projection * glm::lookAt(camera.position, camera.target, camera.up)};
 }
 
-graphics::Transform lineBetween(glm::vec3 from, glm::vec3 to)
-{
-    const glm::vec3 delta = to - from;
-    const float length = glm::length(delta);
-    if (length <= 1.0e-5f) return {from, {}, {0.02f, 0.02f, 0.02f}};
-    return {(from + to) * 0.5f,
-            glm::rotation(glm::vec3{0, 1, 0}, delta / length),
-            {0.02f, length * 0.5f, 0.02f}};
-}
-
-void updateDrag(JointWorld& world, const graphics::Camera& camera,
-                const glm::ivec4& viewport, float& depth)
+void updateDrag(JointWorld& world, const graphics::Camera& camera, const SceneProjection& scene, float& depth)
 {
     const auto& io = ImGui::GetIO();
     if (io.AppFocusLost || !ImGui::IsMouseDown(ImGuiMouseButton_Left))
@@ -68,69 +107,85 @@ void updateDrag(JointWorld& world, const graphics::Camera& camera,
     if (!world.activeDemo() && !pressed) return;
     if (pressed && io.WantCaptureMouse) return;
     const ImVec2 mouse = pressed ? io.MouseClickedPos[ImGuiMouseButton_Left] : io.MousePos;
-    if (!ImGui::IsMousePosValid(&mouse)) return;
-    Ray ray;
-    if (!makeRay(mouse, camera, viewport, ray)) return;
+    if (!ImGui::IsMousePosValid(&mouse) || !scene.rect.Contains(mouse)) return;
+
+    const glm::vec3 direction = scene.rayDirection(mouse, camera.position);
     const glm::vec3 forward = glm::normalize(camera.target - camera.position);
-    const float rayForward = glm::dot(ray.direction, forward);
-    if (rayForward <= 1.0e-4f) return;
     if (pressed)
     {
         JointWorld::DemoId id;
         physx::PxVec3 hit;
-        if (!world.beginDrag({ray.origin.x, ray.origin.y, ray.origin.z},
-                             {ray.direction.x, ray.direction.y, ray.direction.z}, id, hit))
-            return;
-        depth = glm::dot(glm::vec3{hit.x, hit.y, hit.z} - ray.origin, forward);
+        const auto eye = camera.position;
+        if (!world.beginDrag({eye.x, eye.y, eye.z}, {direction.x, direction.y, direction.z}, id, hit)) return;
+        depth = glm::dot(vectorOf(hit) - eye, forward);
     }
     if (!world.activeDemo()) return;
-    if (io.MouseWheel != 0.0f)
-        depth = std::clamp(depth - io.MouseWheel * 0.5f, camera.nearPlane + 0.05f, camera.farPlane - 1.0f);
-    const float distance = depth / rayForward;
-    const glm::vec3 target = ray.origin + ray.direction * distance;
+    depth = std::clamp(depth - io.MouseWheel * 0.5f, camera.nearPlane + 0.05f, camera.farPlane - 1.0f);
+    const glm::vec3 target = camera.position + direction * (depth / glm::dot(direction, forward));
     world.moveDrag(*world.activeDemo(), {target.x, target.y, target.z});
 }
 }
 
 void JointView::configure(graphics::Workbench& app, JointWorld& world)
 {
-    app.camera = {{0.0f, 7.0f, 18.0f}, {0.0f, 2.2f, 0.0f}};
-    app.controls = [&world]
+    app.camera = {{0, 6.2f, 13.2f}, {0, 3.65f, 0}};
+    app.controls = []
     {
-        ImGui::SeparatorText("Six independent joint demonstrations");
-        ImGui::TextWrapped("Drag an orange driver. Each driver controls only the blue body in its own row.");
-        for (const auto& demo : world.demos())
-            ImGui::BulletText("%s: %s", demo.name, demo.control);
+        ImGui::SeparatorText("Mouse");
+        ImGui::TextWrapped("Hold and drag an orange part. Watch how the blue part follows.");
+        ImGui::Spacing();
+        ImGui::TextWrapped("Scroll while holding to move in depth.");
     };
     app.inspector = [&world]
     {
-        ImGui::SeparatorText("Joint values");
-        for (const auto& demo : world.demos())
-            ImGui::Text("%-10s % .3f", demo.name, world.jointValue(demo));
-    };
-    app.drawScene = [&app, &world, this, boxMesh = graphics::MeshHandle{}, sphereMesh = graphics::MeshHandle{}]
-                    (graphics::SceneRenderer& renderer) mutable
-    {
-        if (!boxMesh) boxMesh = renderer.createMesh(graphics::primitives::box());
-        if (!sphereMesh) sphereMesh = renderer.createMesh(graphics::primitives::sphere());
-        glm::ivec4 viewport;
-        glGetIntegerv(GL_VIEWPORT, &viewport.x);
-        updateDrag(world, app.camera, viewport, grabDepth);
-        renderer.drawMesh(boxMesh, {{0, -0.05f, 0}, {}, {18, 0.05f, 8}}, {{0.31f, 0.36f, 0.40f, 1}});
+        ImGui::SeparatorText("Joint motion");
         for (const auto& demo : world.demos())
         {
-            auto driver = transformOf(*demo.driver);
-            driver.scale = glm::vec3{JointWorld::halfExtent};
-            auto body = transformOf(*demo.body);
-            body.scale = glm::vec3{JointWorld::halfExtent};
-            const glm::vec3 driverPosition = driver.position;
-            const glm::vec3 bodyPosition = body.position;
-            renderer.drawMesh(boxMesh, driver,
-                              demo.dragging ? graphics::Material{{1.0f, 0.90f, 0.15f, 1}, true}
-                                            : graphics::Material{{1.0f, 0.40f, 0.08f, 1}, true});
-            renderer.drawMesh(boxMesh, body, {{0.16f, 0.68f, 0.78f, 1}, true});
-            renderer.drawMesh(sphereMesh, {driverPosition, {}, {0.11f, 0.11f, 0.11f}}, {{0.95f, 0.85f, 0.20f, 1}, true});
-            renderer.drawMesh(boxMesh, lineBetween(driverPosition, bodyPosition), {{0.95f, 0.78f, 0.20f, 1}, true});
+            ImGui::TextUnformatted(demo.name);
+            ImGui::TextDisabled("%s", demo.control);
+            const float value = world.jointValue(demo);
+            if (demo.kind == Kind::D6)
+                ImGui::Text("X: %.2f m | Twist: %.0f deg", value,
+                            glm::degrees(demo.joint->is<physx::PxD6Joint>()->getTwistAngle()));
+            else if (demo.kind == Kind::Distance || demo.kind == Kind::Prismatic)
+                ImGui::Text("%.2f m", value);
+            else if (demo.kind == Kind::Spherical || demo.kind == Kind::Revolute)
+                ImGui::Text("%.0f deg", glm::degrees(value));
+            ImGui::Spacing();
         }
+    };
+    app.drawScene = [&app, &world, this, box = graphics::MeshHandle{}, axle = graphics::MeshHandle{}]
+                    (graphics::SceneRenderer& renderer) mutable
+    {
+        if (!box) box = renderer.createMesh(graphics::primitives::box());
+        if (!axle) axle = renderer.createMesh(axleMesh());
+        const auto scene = sceneProjection(app.camera);
+        updateDrag(world, app.camera, scene, grabDepth);
+        renderer.drawMesh(box, {{0, -0.05f, 5}, {}, {18, 0.05f, 7}}, {{0.19f, 0.23f, 0.27f, 1}});
+        auto* labels = ImGui::GetBackgroundDrawList();
+        labels->PushClipRect(scene.rect.Min, scene.rect.Max, true);
+        for (const auto& demo : world.demos())
+        {
+            const bool pin = demo.kind == Kind::Revolute || demo.kind == Kind::D6;
+            const auto driver = transformOf(*demo.driver, pin ? glm::vec3{demo.driverHalfExtents.y}
+                                                               : vectorOf(demo.driverHalfExtents));
+            const auto body = transformOf(*demo.body, vectorOf(demo.bodyHalfExtents));
+            const graphics::Material orange{demo.dragging ? glm::vec4{1, 0.72f, 0.22f, 1}
+                                                          : glm::vec4{1, 0.51f, 0.17f, 1}};
+            renderer.drawMesh(pin ? axle : box, driver, orange);
+            renderer.drawMesh(box, body, {{0.19f, 0.74f, 0.82f, 1}});
+            if (demo.kind == Kind::Distance)
+            {
+                // Only this joint spans a gap: its two anchors are at the part centers.
+                const glm::vec3 delta = body.position - driver.position;
+                const float length = glm::length(delta);
+                if (length > 0.001f)
+                    renderer.drawMesh(box, {(driver.position + body.position) * 0.5f,
+                        glm::rotation(glm::vec3{0, 1, 0}, delta / length), {0.017f, length * 0.5f, 0.017f}},
+                        {{0.85f, 0.87f, 0.89f, 1}});
+            }
+            scene.label(driver.position + glm::vec3{0, 1.12f, 0}, demo.name);
+        }
+        labels->PopClipRect();
     };
 }

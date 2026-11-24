@@ -9,7 +9,7 @@ class JointWorld
 {
 public:
     static constexpr float fixedStep = 1.0f / 60.0f;
-    static constexpr float halfExtent = 0.45f;
+    static constexpr float shaftHalfLengthInRadii = 4.0f;
 
     enum class Kind { Fixed, Distance, Spherical, Revolute, Prismatic, D6 };
     enum class DemoId : std::size_t { Fixed, Distance, Spherical, Revolute, Prismatic, D6, Count };
@@ -19,6 +19,8 @@ public:
         Kind kind;
         const char* name;
         const char* control;
+        physx::PxVec3 driverHalfExtents{0.0f};
+        physx::PxVec3 bodyHalfExtents{0.0f};
         physx::PxRigidDynamic* driver = nullptr;
         physx::PxRigidDynamic* body = nullptr;
         physx::PxJoint* joint = nullptr;
@@ -45,7 +47,9 @@ public:
 
 private:
     void createDemo(Demo& demo, const physx::PxVec3& position);
-    physx::PxJoint* createJoint(Demo& demo);
+    void createParts(Demo& demo, const physx::PxTransform& driverPose,
+                     const physx::PxVec3& driverHalfExtents, const physx::PxVec3& bodyOffset,
+                     const physx::PxVec3& bodyHalfExtents);
 
     physx::PxDefaultAllocator allocator_;
     physx::PxDefaultErrorCallback errors_;
@@ -56,12 +60,14 @@ private:
     physx::PxMaterial* material_ = nullptr;
     physx::PxRigidStatic* ground_ = nullptr;
     std::array<Demo, static_cast<std::size_t>(DemoId::Count)> demos_{
-        {{Kind::Fixed, "Fixed", "drag: rigidly carries the body"},
-         {Kind::Distance, "Distance", "drag: keeps distance in [0.75, 1.25] m"},
-         {Kind::Spherical, "Spherical", "drag: keeps the point, allows rotation"},
-         {Kind::Revolute, "Revolute", "drag: rotates around the X axis"},
-         {Kind::Prismatic, "Prismatic", "drag: slides along the X axis"},
-         {Kind::D6, "D6", "drag: X translation and X rotation are free"}}};
+        {{Kind::Fixed, "Fixed", "Stays rigid."},
+         {Kind::Distance, "Distance", "Tether: 0.75 to 1.25 m."},
+         {Kind::Spherical, "Spherical", "Swings around the pivot."},
+         {Kind::Revolute, "Revolute", "Swings on the pin."},
+         {Kind::Prismatic, "Prismatic", "Slides on the rail."},
+         {Kind::D6, "D6", "Slides and twists."}}};
     std::optional<DemoId> activeDemo_;
+    physx::PxVec3 grabOffset_{0.0f};
+    physx::PxVec3 dragTarget_{0.0f};
     bool extensionsInitialized_ = false;
 };
