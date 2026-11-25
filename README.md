@@ -11,3 +11,5 @@ cmake --build build --target RigidBody
 ```
 
 加入新项目后重新执行配置，再把构建命令里的 `RigidBody` 换成新目标名。构建新目标只会编译它和需要更新的依赖。需要仿真窗口时，链接 [Graphics::Workbench](graphics/README.md)。
+
+关节示例：[JointPlayground](JointPlayground/README.md) 比较六种独立关节；[Articulation](Articulation/README.md) 用两节机械臂展示父子连杆和关节位置驱动。
